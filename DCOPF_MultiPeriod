@@ -1,0 +1,140 @@
+                                                    #Packages & Model
+from pyomo.environ import *
+from pyomo.opt import *
+import math
+
+model = AbstractModel()
+########################################################################################################################
+                                                        #Sets
+#Nodes:
+model.NODES = Set()
+model.SLACK = Set(within=model.NODES)
+#Lines:
+model.LINES = Set(within=model.NODES*model.NODES)
+def NodesOut_init_(model,n):
+    for i,j in model.LINES:
+        if i == n:
+            yield j
+model.NodesOut = Set(model.NODES, initialize=NodesOut_init_)
+#
+def NodesIn_init_(model,n):
+    for i,j in model.LINES:
+        if j == n:
+            yield i
+model.NodesIn = Set(model.NODES, initialize=NodesIn_init_)
+#Times:
+model.TIMES = Set()
+#Generators:
+model.GENERATORS = Set()
+model.BLOCKS = Set()
+model.GxN = Set(within=model.GENERATORS*model.NODES)
+#Demands:
+model.DEMANDS = Set()
+model.DxN = Set(within=model.DEMANDS*model.NODES)
+########################################################################################################################
+                                                        #Parameters
+#Lines:
+model.X = Param(model.LINES)
+model.f_max = Param(model.LINES)
+#Generators:
+model.P_min = Param(model.GENERATORS,model.BLOCKS,model.TIMES)
+model.P_max = Param(model.GENERATORS,model.BLOCKS,model.TIMES)
+model.Cost = Param(model.GENERATORS,model.BLOCKS,model.TIMES)
+#Demands:
+model.P_D = Param(model.DEMANDS*model.TIMES)
+#Sbase:
+model.Sbase = Param()
+########################################################################################################################
+                                                        #Variables
+model.P_G = Var(model.GENERATORS,model.BLOCKS,model.TIMES, within=Reals)
+model.F = Var(model.LINES,model.TIMES, within=Reals)
+model.Teta = Var(model.NODES,model.TIMES, within=Reals)
+########################################################################################################################
+                                                #Objective Function
+def objective_rule(model):
+    return sum(model.Cost[g,b,t]*model.P_G[g,b,t] for g in model.GENERATORS for b in model.BLOCKS for t in model.TIMES)
+model.minCost = Objective(rule=objective_rule, sense=minimize)
+########################################################################################################################
+                                                        #Constraints
+def power_balance_rule(model,n,t):
+    return (sum(model.P_G[g,b,t] for g in model.GENERATORS for b in model.BLOCKS if (g,n) in model.GxN) \
+            +sum(model.F[i,n,t] for i in model.NodesIn[n]) \
+            -sum(model.F[n,j,t] for j in model.NodesOut[n]) \
+            -sum((model.P_D[d,t]/model.Sbase) for d in model.DEMANDS if (d,n) in model.DxN) \
+            )  == 0
+model.power_balance_constraint = Constraint(model.NODES, model.TIMES, rule=power_balance_rule)
+#
+def flow_rule(model,i,j,t):
+    return model.F[i,j,t] == (model.Teta[i,t] - model.Teta[j,t])/model.X[i,j]
+model.flow_constraint = Constraint(model.LINES, model.TIMES, rule=flow_rule)
+#
+def min_gen_rule(model,g,b,t):
+    return (model.P_min[g,b,t]/model.Sbase) <= model.P_G[g,b,t]
+model.min_gen_constraint = Constraint(model.GENERATORS, model.BLOCKS, model.TIMES, rule=min_gen_rule)
+#
+def max_gen_rule(model,g,b,t):
+    return model.P_G[g,b,t] <= (model.P_max[g,b,t]/model.Sbase)
+model.max_gen_constraint = Constraint(model.GENERATORS, model.BLOCKS, model.TIMES, rule=max_gen_rule)
+#
+def min_flow_rule(model,i,j,t):
+    return -(model.f_max[i,j]/model.Sbase) <= model.F[i,j,t]
+model.min_flow_constraint = Constraint(model.LINES,model.TIMES, rule=min_flow_rule)
+#
+def max_flow_rule(model,i,j,t):
+    return model.F[i,j,t] <= +(model.f_max[i,j]/model.Sbase)
+model.max_flow_constraint = Constraint(model.LINES,model.TIMES, rule=max_flow_rule)
+#
+def min_teta_rule(model,n,t):
+    return -math.pi <= model.Teta[n,t]
+model.min_teta_constraint = Constraint(model.NODES,model.TIMES, rule=min_teta_rule)
+#
+def max_teta_rule(model,n,t):
+    return model.Teta[n,t] <= +math.pi
+model.max_teta_constraint = Constraint(model.NODES,model.TIMES, rule=max_teta_rule)
+#
+def slack_rule(model,n,t):
+    return model.Teta[n,t] == 0
+model.slack_constraint = Constraint(model.SLACK, model.TIMES, rule=slack_rule)
+########################################################################################################################
+                                                #Creating a model instance
+data = DataPortal()     #read the data
+data.load(filename="DCOPF_MultiBlock_Data.dat", model=model)   #load the data file
+instance = model.create_instance(data) #creating instance
+instance.pprint() # printing the instance (you might not need it, because it shows all the constraints and objective function in detail)
+########################################################################################################################
+########################################################################################################################
+                                                    #Running the model
+optimizer = SolverFactory("cplex")
+results = optimizer.solve(instance)
+########################################################################################################################
+                                      #Checking solver status and printing results by display()
+if (results.solver.status == SolverStatus.ok) and (results.solver.termination_condition == TerminationCondition.optimal):
+    print("********************No worries! Code is FINE!********************")
+    print("*******************Showing results by display()******************")
+    instance.display()
+elif (results.solver.termination_condition == TerminationCondition.infeasible) or (results.solver.termination_condition == TerminationCondition.other):
+    print("Model is Infeasible. Check constraints.")
+else:
+    print("Solver Status: ", results.solver.status)
+    print("Termination Condition: ", results.solver.termination_condition)
+########################################################################################################################
+                                                #Showing results by print()
+print("*******************************************************************")
+print("********************Showing results by print()*********************")
+print("###")
+print(f"Objective Function: {value(instance.minCost)*instance.Sbase.value}")
+print("###")
+for g in instance.GENERATORS:
+    for b in instance.BLOCKS:
+        for t in instance.TIMES:
+            print(f"P_G({g,b,t})= {value(instance.P_G[g,b,t])*instance.Sbase.value}")
+print("###")
+for (i,j) in instance.LINES:
+    for t in instance.TIMES:
+        print(f"F(({i},{j}),{t})= {value(instance.F[i,j,t])*instance.Sbase.value}")
+print("###")
+for n in instance.NODES:
+    for t in instance.TIMES:
+        print(f"Teta({n,t})= {value(instance.Teta[n,t])}")
+print("###")
+
